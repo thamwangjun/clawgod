@@ -210,9 +210,9 @@ if [ -z "$NATIVE_BIN" ]; then
     exit 1
   fi
   NPM_PKG="@anthropic-ai/claude-code-${PLATFORM}"
-  dim "Fetching $NPM_PKG@latest from npm registry ..."
+  dim "Fetching $NPM_PKG@${VERSION} from npm registry ..."
   NATIVE_BIN_TMPDIR=$(mktemp -d)
-  if ( cd "$NATIVE_BIN_TMPDIR" && npm pack "$NPM_PKG@latest" --silent >/dev/null 2>&1 ); then
+  if ( cd "$NATIVE_BIN_TMPDIR" && npm pack "$NPM_PKG@${VERSION}" --silent >/dev/null 2>&1 ); then
     TARBALL=$(ls "$NATIVE_BIN_TMPDIR"/*.tgz 2>/dev/null | head -1)
     if [ -n "$TARBALL" ]; then
       ( cd "$NATIVE_BIN_TMPDIR" && tar xzf "$TARBALL" )
