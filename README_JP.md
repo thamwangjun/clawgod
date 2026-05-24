@@ -21,8 +21,7 @@ ClawGod インストーラ実行**前**に揃えておくもの：
 | **Claude Code**（ネイティブバイナリ） | ClawGod は既に入っている公式 Bun standalone バイナリにパッチを当てる | [`claude.ai/install.sh`](https://claude.ai/install.sh)（macOS/Linux）または [`claude.ai/install.ps1`](https://claude.ai/install.ps1)（Windows） |
 | **ripgrep** | Claude Code の Grep ツールが必須 | `brew install ripgrep` / `apt install ripgrep` / `winget install BurntSushi.ripgrep.MSVC` |
 | **Node.js >= 18** | パッチャが利用 | [nodejs.org](https://nodejs.org) |
-
-[Bun](https://bun.sh) はパッチ済み cli.js を実行するランタイム——インストーラが見つからない場合は自動でインストールします。
+| **Bun** | パッチ済み cli.js の実行ランタイム、未検出時は自動インストール | [bun.sh](https://bun.sh)、`npm install -g bun`、`scoop install bun`、または `choco install bun` |
 
 ## インストール
 
@@ -75,6 +74,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | 機能 | 効果 |
 |------|------|
 | **1h Prompt Cache** | 1h TTL allowlist を強制有効化（デフォルトは実質 5m → アイドル後の cache_creation トークン浪費を防止） |
+| **サードパーティ Cache 修正** | `baseURL` が Anthropic 以外を指す場合、`x-anthropic-billing-header` を自動的に無効化します。このヘッダーの `cch` フィールドはリクエストごとに変化するため、DeepSeek / OneAPI / Bedrock / vLLM など Anthropic 互換プロキシでは prompt-cache ヒット率がゼロになります。`CLAUDE_CODE_ATTRIBUTION_HEADER=0` を自分で設定する必要はもうありません。 |
 | **自動再パッチ** | ユーザーがネイティブ Claude バイナリをアップグレードすると、次回起動時に自動的に再抽出・再パッチ |
 
 ## コマンド
@@ -159,3 +159,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 -Out
 ## ライセンス
 
 GPL-3.0 — Anthropic とは無関係です。自己責任でご使用ください。
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=0Chencc/clawgod&type=date&legend=top-left)](https://www.star-history.com/?repos=0Chencc%2Fclawgod&type=date&legend=top-left)

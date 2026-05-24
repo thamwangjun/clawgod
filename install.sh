@@ -101,6 +101,36 @@ else
 fi
 info "Bun: $($BUN_BIN --version)"
 
+# ─── Bun version pre-flight ───────────────────────────────────────────
+# Anthropic builds the native binary with Bun's canary channel; stable
+# bun.sh trails by one version. Bun < 1.3.14 panics on cli.original.cjs
+# with "Expected CommonJS module to have a function wrapper". Refuse
+# early — no npm download / no patch / no late sanity surprise.
+# Bump MIN_BUN_VERSION when Anthropic moves the embedded Bun forward
+# again (track via 'bun upgrade --canary' on a runner + smoke test).
+
+MIN_BUN_VERSION="1.3.14"
+BUN_VERSION_RAW=$($BUN_BIN --version 2>/dev/null | head -1)
+BUN_VERSION_NUM=$(echo "$BUN_VERSION_RAW" | sed 's/-.*//')
+if [ -z "$BUN_VERSION_NUM" ] \
+   || [ "$(printf '%s\n%s\n' "$BUN_VERSION_NUM" "$MIN_BUN_VERSION" | sort -V | head -1)" != "$MIN_BUN_VERSION" ]; then
+  warn ""
+  warn "Bun ${BUN_VERSION_RAW:-<unknown>} is below the required minimum ($MIN_BUN_VERSION)."
+  warn ""
+  warn "  Anthropic builds claude-code with Bun's canary channel. Older Bun"
+  warn "  panics on cli.original.cjs with 'Expected CommonJS module to have"
+  warn "  a function wrapper'. This is a hard requirement, not a warning."
+  warn ""
+  warn "  Upgrade with one of:"
+  warn "    bun upgrade --canary               (if installed via curl/install.sh)"
+  warn "    brew upgrade bun                   (homebrew)"
+  warn "    scoop uninstall bun && \\           (scoop — shim blocks self-replace)"
+  warn "      irm https://bun.sh/install.ps1 | iex && bun upgrade --canary"
+  warn ""
+  warn "  Then re-run this installer."
+  exit 1
+fi
+
 # ─── ripgrep prerequisite (search/grep tool) ──────────────────────────
 # Without rg the Grep tool inside Claude Code fails. Bun-bundled ripgrep
 # is only reachable from inside the standalone executable; running the
@@ -207,7 +237,7 @@ if [ -z "$NATIVE_BIN" ]; then
 fi
 
 if [ -z "$NATIVE_BIN" ]; then
-  warn "Native Claude Code binary not found in $VERSIONS_DIR"
+  warn "Native Claude Code binary not found"
   warn "Install the official binary first:"
   warn "  curl -fsSL https://claude.ai/install.sh | bash"
   warn "Then re-run this script."
@@ -839,6 +869,18 @@ if (hasProviderApiKey) {
   process.env.ANTHROPIC_BASE_URL ??= config.baseURL;
 }
 
+// Third-party Anthropic-compatible proxies (DeepSeek / OneAPI / Bedrock /
+// vLLM / etc.) don't share Anthropic's server-side handling of
+// x-anthropic-billing-header. That header carries a per-request `cch` field
+// which Anthropic's own server excludes from prompt-cache key calculation
+// (via cacheScope:null), but third-party proxies fold into the prefix hash —
+// so the cached prefix changes every request and cache hit rate drops to
+// zero. Auto-disable the header whenever baseURL points away from Anthropic.
+// Users can force re-enable with CLAUDE_CODE_ATTRIBUTION_HEADER=1 if needed.
+if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
+  process.env.CLAUDE_CODE_ATTRIBUTION_HEADER ??= '0';
+}
+
 if (config.timeoutMs) {
   process.env.API_TIMEOUT_MS ??= String(config.timeoutMs);
 }
@@ -953,11 +995,14 @@ const patches = [
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
-    // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&...)return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
-    // v2.1.119+: same gate plus extra branches for claude-opus-4-7. We drop the
-    //            gate prefix; downstream model regexes still run.
+    // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
+    // v2.1.119+: same gate plus extra branches for claude-opus-4-7.
+    // v2.1.139+: gate moved inside function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if($.includes("claude-3-")||...)return!0;return!1}
+    //            i.e. the `let` lifted to a comma-list before the if; the if-gate
+    //            itself is unchanged shape. We drop only the if-gate; downstream
+    //            model allow-list still runs and now accepts third-party calls.
     name: 'Auto-mode unlock for third-party API',
-    pattern: /let ([\w$]+)=[\w$]+\(\);if\(\1!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
+    pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
     replacer: () => '',
     sentinel: '!=="firstParty"&&',
   },

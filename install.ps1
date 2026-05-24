@@ -14,8 +14,7 @@
 #>
 param(
     [string]$Version = "latest",
-    [switch]$Uninstall,
-    [switch]$DryRun
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,11 +58,13 @@ if ($Uninstall) {
         Write-OK "Removed clawgod alias"
     }
 
-    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs",".source-version","node_modules","bun-runtime")) {
+    foreach ($f in @("cli.js","cli.cjs","cli.original.js","cli.original.cjs","cli.original.js.bak","cli.original.cjs.bak","patch.js","patch.mjs","extract-natives.mjs","post-process.mjs","repatch.mjs",".source-version","node_modules","bun-runtime","vendor")) {
         $p = Join-Path $ClawDir $f
         if (Test-Path $p) { Remove-Item -Recurse -Force $p }
     }
     Write-OK "ClawGod uninstalled"
+    Write-Host ""
+    Write-Dim "Restart your terminal for changes to take effect."
     Write-Host ""
     exit 0
 }
@@ -101,7 +102,85 @@ if (-not $BunBin) {
         exit 1
     }
 }
+
+# Resolve bun.ps1 → bun.exe. When Bun is installed via `npm install -g bun`,
+# Get-Command returns a .ps1 wrapper script. A .cmd launcher cannot invoke .ps1
+# directly — Windows opens the file association dialog instead of executing it.
+# Probe known install paths instead of parsing wrapper scripts.
+if ($BunBin -and $BunBin -match '\.ps1$') {
+    $resolved = $null
+    $bunDir = Split-Path $BunBin
+    # 1. npm global: bun.ps1 sits next to node_modules/bun/bin/bun.exe
+    $cand = Join-Path $bunDir "node_modules\bun\bin\bun.exe"
+    if (Test-Path $cand) { $resolved = $cand }
+    # 2. bun.sh official install
+    if (-not $resolved) {
+        $cand = Join-Path $env:USERPROFILE ".bun\bin\bun.exe"
+        if (Test-Path $cand) { $resolved = $cand }
+    }
+    # 3. Scoop: shim exe lives in ~/scoop/shims/
+    if (-not $resolved) {
+        $cand = Join-Path $env:USERPROFILE "scoop\shims\bun.exe"
+        if (Test-Path $cand) { $resolved = $cand }
+    }
+    # 4. Chocolatey: typically in C:\ProgramData\chocolatey\bin\
+    if (-not $resolved) {
+        $chocoBin = Join-Path $env:ProgramData "chocolatey\bin\bun.exe"
+        if (Test-Path $chocoBin) { $resolved = $chocoBin }
+    }
+    if ($resolved) {
+        Write-Dim "Resolved bun.ps1 → $resolved"
+        $BunBin = $resolved
+    } else {
+        Write-Warn "Bun resolved to .ps1 wrapper ($BunBin). The launcher may not work."
+        Write-Warn "Consider installing Bun via bun.sh/install.ps1 for a native bun.exe."
+    }
+}
 Write-OK "Bun: $(& $BunBin --version)"
+
+# ─── Bun version pre-flight ───────────────────────────────────────────
+# Anthropic builds the native binary with Bun's canary channel; stable
+# bun.sh trails by one version. Bun < 1.3.14 panics on cli.original.cjs
+# with "Expected CommonJS module to have a function wrapper". Refuse
+# early — no npm download / no patch / no late sanity surprise where
+# PowerShell's NativeCommandError display buries the friendly message.
+# Bump $MinBunVersion when Anthropic moves the embedded Bun forward
+# again.
+
+$MinBunVersion = '1.3.14'
+$BunVersionRaw = ''
+try {
+    $bunOut = & $BunBin --version 2>$null | Select-Object -First 1
+    if ($bunOut) { $BunVersionRaw = "$bunOut".Trim() }
+} catch {}
+$BunVersionNum = ($BunVersionRaw -split '-')[0]
+$BunVersionOk = $false
+try {
+    if ($BunVersionNum) {
+        $BunVersionOk = ([version]$BunVersionNum) -ge ([version]$MinBunVersion)
+    }
+} catch {}
+if (-not $BunVersionOk) {
+    Write-Host ""
+    Write-Err "Bun $BunVersionRaw is below the required minimum ($MinBunVersion)."
+    Write-Err ""
+    Write-Err "  Anthropic builds claude-code with Bun's canary channel. Older Bun"
+    Write-Err "  panics on cli.original.cjs with 'Expected CommonJS module to have"
+    Write-Err "  a function wrapper'. This is a hard requirement, not a warning."
+    Write-Err ""
+    Write-Err "  Upgrade with one of:"
+    Write-Err "    bun upgrade --canary"
+    Write-Err "    powershell -c ""iex & {`$(irm https://bun.sh/install.ps1)} -Version canary"""
+    Write-Err ""
+    Write-Err "  If your bun is from scoop (the binary is behind a shim and refuses"
+    Write-Err "  to self-replace, so 'bun upgrade' silently hangs):"
+    Write-Err "    scoop uninstall bun"
+    Write-Err "    irm https://bun.sh/install.ps1 | iex"
+    Write-Err "    bun upgrade --canary"
+    Write-Err ""
+    Write-Err "  Then re-run this installer."
+    exit 1
+}
 
 # ─── ripgrep prerequisite (search/grep tool) ──────────────────────────
 # Hard prerequisite — without rg the Grep tool inside Claude Code fails.
@@ -164,26 +243,71 @@ if (-not $NativeBin) {
     $NativeBinTmpDir = Join-Path $env:TEMP "clawgod-binary-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Force -Path $NativeBinTmpDir | Out-Null
     $fetchScript = Join-Path $NativeBinTmpDir "fetch.mjs"
+    $useNpmFetch = $false
+    $noProxy = $env:NO_PROXY
+    if ($env:HTTPS_PROXY -or $env:HTTP_PROXY) {
+        if ($noProxy -match '(?i)npmjs\.org') {
+            Write-Dim "NO_PROXY includes npmjs.org — using direct fetch"
+        } elseif (Get-Command npm -ErrorAction SilentlyContinue) {
+            $useNpmFetch = $true
+        } else {
+            Write-Warn "HTTP proxy detected but npm not found. fetch.mjs may not work through your proxy."
+            Write-Warn "Install npm or set NO_PROXY=registry.npmjs.org to bypass."
+        }
+    }
+    if ($useNpmFetch) {
+        Push-Location $NativeBinTmpDir
+        try {
+            $npmOut = npm pack "$npmPkg@latest" --silent 2>&1
+            $tarball = Get-ChildItem $NativeBinTmpDir -Filter "*.tgz" | Select-Object -First 1
+            if ($tarball) {
+                tar xzf $tarball.FullName 2>$null
+                $cand = Join-Path $NativeBinTmpDir "package\claude.exe"
+                if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 10MB) {
+                    $NativeBin = $cand
+                    $pkgJson = Join-Path $NativeBinTmpDir "package\package.json"
+                    if (Test-Path $pkgJson) {
+                        $NativeBinLabel = (Get-Content $pkgJson -Raw | ConvertFrom-Json).version
+                    } else { $NativeBinLabel = "npm-latest" }
+                    Write-OK "Downloaded $npmPkg@$NativeBinLabel (via npm)"
+                }
+            }
+        } finally { Pop-Location }
+        if (-not $NativeBin) {
+            Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
+            Write-Err "npm pack failed. Output:"
+            Write-Dim ($npmOut -join "`n")
+            exit 1
+        }
+    } else {
     @'
 // Download a scoped npm tarball (no npm CLI dependency) and extract it
 // using Node's built-in zlib + a minimal POSIX tar parser.
 import { request as httpsRequest } from 'node:https';
+import { request as httpRequest } from 'node:http';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { URL } from 'node:url';
 
 const [, , pkgSpec, outDir] = process.argv;
 const last = pkgSpec.lastIndexOf('@');
 const pkg = last > 0 ? pkgSpec.slice(0, last) : pkgSpec;
 const ver = last > 0 ? pkgSpec.slice(last + 1) : 'latest';
 
-function get(url) {
+function get(url, redirects = 0) {
   return new Promise((resolve, reject) => {
-    httpsRequest(url, { method: 'GET' }, (res) => {
+    if (redirects > 5) return reject(new Error(`Too many redirects`));
+    const parsed = new URL(url);
+    const reqMod = parsed.protocol === 'https:' ? httpsRequest : httpRequest;
+    const opts = { method: 'GET', hostname: parsed.hostname, port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80), path: parsed.pathname + parsed.search };
+    reqMod(opts, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return get(res.headers.location).then(resolve, reject);
+        res.resume();
+        return get(res.headers.location, redirects + 1).then(resolve, reject);
       }
       if (res.statusCode !== 200) {
+        res.resume();
         return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
       }
       const chunks = [];
@@ -222,32 +346,32 @@ console.log(`Extracted ${files} files`);
 console.log(`VERSION=${meta.version}`);
 '@ | Set-Content $fetchScript -Encoding UTF8
 
-    $output = & node $fetchScript "$npmPkg@latest" $NativeBinTmpDir 2>&1
-    $exitCode = $LASTEXITCODE
-    $output | ForEach-Object { Write-Host "  $_" }
-    Remove-Item -Force $fetchScript -ErrorAction SilentlyContinue
+        $output = & node $fetchScript "$npmPkg@latest" $NativeBinTmpDir 2>&1
+        $exitCode = $LASTEXITCODE
+        $output | ForEach-Object { Write-Host "  $_" }
+        Remove-Item -Force $fetchScript -ErrorAction SilentlyContinue
 
-    if ($exitCode -ne 0) {
-        Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
-        Write-Err "Fetch failed (node exit $exitCode). Install the official binary manually:"
-        Write-Err "    irm https://claude.ai/install.ps1 | iex"
-        exit 1
-    }
+        if ($exitCode -ne 0) {
+            Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
+            Write-Err "Fetch failed (node exit $exitCode). Install the official binary manually:"
+            Write-Err "    irm https://claude.ai/install.ps1 | iex"
+            exit 1
+        }
 
-    $cand = Join-Path $NativeBinTmpDir "package\claude.exe"
-    if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 10MB) {
-        $NativeBin = $cand
-        # Pull the version line printed by fetch.mjs ("VERSION=2.1.x")
-        $verLine = $output | Where-Object { $_ -match '^VERSION=' } | Select-Object -First 1
-        if ($verLine) { $NativeBinLabel = ($verLine -replace '^VERSION=', '').Trim() }
-        else { $NativeBinLabel = "npm-latest" }
-    } else {
-        Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
-        Write-Err "Tarball downloaded but expected package\claude.exe was missing or too small."
-        Write-Err "  Tempdir kept for inspection: $NativeBinTmpDir"
-        exit 1
+        $cand = Join-Path $NativeBinTmpDir "package\claude.exe"
+        if ((Test-Path $cand) -and (Get-Item $cand).Length -gt 10MB) {
+            $NativeBin = $cand
+            $verLine = $output | Where-Object { $_ -match '^VERSION=' } | Select-Object -First 1
+            if ($verLine) { $NativeBinLabel = ($verLine -replace '^VERSION=', '').Trim() }
+            else { $NativeBinLabel = "npm-latest" }
+        } else {
+            Remove-Item -Recurse -Force $NativeBinTmpDir -ErrorAction SilentlyContinue
+            Write-Err "Tarball downloaded but expected package\claude.exe was missing or too small."
+            Write-Err "  Tempdir kept for inspection: $NativeBinTmpDir"
+            exit 1
+        }
+        Write-OK "Downloaded $npmPkg@$NativeBinLabel"
     }
-    Write-OK "Downloaded $npmPkg@$NativeBinLabel"
 }
 
 if (-not $NativeBin) {
@@ -856,6 +980,18 @@ if (hasProviderApiKey) {
   process.env.ANTHROPIC_BASE_URL ??= config.baseURL;
 }
 
+// Third-party Anthropic-compatible proxies (DeepSeek / OneAPI / Bedrock /
+// vLLM / etc.) don't share Anthropic's server-side handling of
+// x-anthropic-billing-header. That header carries a per-request `cch` field
+// which Anthropic's own server excludes from prompt-cache key calculation
+// (via cacheScope:null), but third-party proxies fold into the prefix hash —
+// so the cached prefix changes every request and cache hit rate drops to
+// zero. Auto-disable the header whenever baseURL points away from Anthropic.
+// Users can force re-enable with CLAUDE_CODE_ATTRIBUTION_HEADER=1 if needed.
+if (config.baseURL && !/anthropic\.com/i.test(config.baseURL)) {
+  process.env.CLAUDE_CODE_ATTRIBUTION_HEADER ??= '0';
+}
+
 if (config.timeoutMs) {
   process.env.API_TIMEOUT_MS ??= String(config.timeoutMs);
 }
@@ -877,11 +1013,8 @@ require('./cli.original.cjs');
 Write-OK "Wrapper created (cli.cjs)"
 
 # ─── Write universal patcher ──────────────────────────
-# (Same Node.js patcher as bash version — extract from install.sh or inline)
+# (Same Node.js patcher as bash version — inline to avoid extra download)
 
-$patcherUrl = "https://raw.githubusercontent.com/0Chencc/clawgod/main/patcher.mjs"
-
-# Inline the patcher to avoid extra download
 $patcherCode = @'
 #!/usr/bin/env node
 /**
@@ -991,8 +1124,14 @@ const patches = [
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
+    // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
+    // v2.1.119+: same gate plus extra branches for claude-opus-4-7.
+    // v2.1.139+: gate moved inside function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if($.includes("claude-3-")||...)return!0;return!1}
+    //            i.e. the `let` lifted to a comma-list before the if; the if-gate
+    //            itself is unchanged shape. We drop only the if-gate; downstream
+    //            model allow-list still runs and now accepts third-party calls.
     name: 'Auto-mode unlock for third-party API',
-    pattern: /let ([\w$]+)=[\w$]+\(\);if\(\1!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
+    pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
     replacer: () => '',
     sentinel: '!=="firstParty"&&',
   },
@@ -1169,7 +1308,7 @@ node (Join-Path $ClawDir "patch.mjs")
 
 $featuresFile = Join-Path $ClawDir "features.json"
 if (-not (Test-Path $featuresFile)) {
-    @'
+    $featuresJson = @'
 {
   "tengu_harbor": true,
   "tengu_session_memory": true,
@@ -1178,9 +1317,12 @@ if (-not (Test-Path $featuresFile)) {
   "tengu_destructive_command_warning": true,
   "tengu_immediate_model_command": true,
   "tengu_desktop_upsell": false,
+  "tengu_malort_pedway": {"enabled": true},
+  "tengu_amber_quartz_disabled": false,
   "tengu_prompt_cache_1h_config": {"allowlist": ["*"]}
 }
-'@ | Set-Content $featuresFile -Encoding UTF8
+'@
+    [System.IO.File]::WriteAllText($featuresFile, $featuresJson, (New-Object System.Text.UTF8Encoding $false))
     Write-OK "Default features.json created"
 }
 
@@ -1194,7 +1336,23 @@ if (-not (Test-Path $featuresFile)) {
 
 Write-Dim "Verifying Bun can load patched cli.original.cjs ..."
 $sanityCli = Join-Path $ClawDir "cli.cjs"
-$sanityOut = & $BunBin $sanityCli --version 2>&1 | Out-String
+# PowerShell folds native-command stderr into the error stream as
+# ErrorRecord objects; with $ErrorActionPreference='Stop' (common when
+# this script is piped through `iex`) that terminates BEFORE we even
+# read $sanityOut. Localize ErrorActionPreference + try/catch so the
+# panic message reliably lands in $sanityOut and our friendly Write-Err
+# block runs. Defense-in-depth — pre-flight already blocks Bun < $MinBunVersion;
+# this remains for the day Anthropic bumps embedded Bun past our constant.
+$sanityOut = $null
+try {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $sanityOut = (& $BunBin $sanityCli --version 2>&1 | Out-String)
+} catch {
+    $sanityOut = "$_"
+} finally {
+    $ErrorActionPreference = $prevEAP
+}
 if ($sanityOut -match "Expected CommonJS module to have a function wrapper") {
     Write-Host ""
     Write-Err "Bun $(& $BunBin --version) cannot load Anthropic's cli.original.cjs."
@@ -1206,6 +1364,7 @@ if ($sanityOut -match "Expected CommonJS module to have a function wrapper") {
     Write-Err ""
     Write-Err "  If your bun is from bun.sh:"
     Write-Err "    bun upgrade --canary"
+    Write-Err "    or: powershell -c ""iex & {`$(irm https://bun.sh/install.ps1)} -Version canary"""
     Write-Err ""
     Write-Err "  If your bun is from scoop (the binary is behind a shim and refuses to"
     Write-Err "  self-replace, so 'bun upgrade' silently hangs):"
@@ -1220,9 +1379,24 @@ Write-OK "Bun loads cli.original.cjs"
 
 # ─── Replace claude command ───────────────────────────
 
-$cliPath = (Join-Path $ClawDir "cli.cjs") -replace '\\', '\\'
-$bunPath = $BunBin -replace '\\', '\\'
-$launcherContent = "@echo off`r`n`"$bunPath`" `"$cliPath`" %*"
+# Build launcher content using %USERPROFILE% env var where possible to avoid
+# encoding issues when the profile path contains non-ASCII characters (e.g.
+# Chinese/Korean/Japanese usernames). cmd.exe resolves %USERPROFILE% at
+# runtime so no problematic characters need to be baked into the .cmd file.
+$cliPathInCmd = "%USERPROFILE%\.clawgod\cli.cjs"
+$normalizedUserProfile = $env:USERPROFILE.TrimEnd('\', '/')
+$normalizedBunBin = $BunBin.TrimEnd('\', '/')
+$userProfilePrefix = "$normalizedUserProfile\"
+if ($normalizedBunBin.Equals($normalizedUserProfile, [StringComparison]::OrdinalIgnoreCase) -or
+    $normalizedBunBin.StartsWith($userProfilePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    $bunRelative = $normalizedBunBin.Substring($normalizedUserProfile.Length).TrimStart('\', '/')
+    $bunPathInCmd = "%USERPROFILE%\$bunRelative"
+} else {
+    # Bun outside USERPROFILE (e.g. system-wide install) — fall back to
+    # absolute path since %USERPROFILE%-relative expansion doesn't apply.
+    $bunPathInCmd = $BunBin
+}
+$launcherContent = "@echo off`r`nif not exist `"$cliPathInCmd`" (`r`n  echo clawgod: cli.cjs not found. Reinstall: irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 ^| iex`r`n  exit /b 127`r`n)`r`nif not exist `"$bunPathInCmd`" (`r`n  echo clawgod: bun not found at $bunPathInCmd. Install: https://bun.sh/install`r`n  exit /b 127`r`n)`r`n`"$bunPathInCmd`" `"$cliPathInCmd`" %*"
 
 # Find and back up original claude
 $claudeCmd = Join-Path $BinDir "claude.cmd"
@@ -1296,7 +1470,7 @@ if (Test-Path $claudeExe) {
 #  - User can invoke patched explicitly via `clawgod` regardless of which
 #    binary 'claude' resolves to
 foreach ($cmd in @("claude", "clawgod")) {
-    $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding ASCII
+    $launcherContent | Set-Content (Join-Path $BinDir "$cmd.cmd") -Encoding Default
 }
 Write-OK "Commands 'claude' + 'clawgod' → patched"
 

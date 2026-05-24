@@ -21,8 +21,7 @@ Install these **before** running the ClawGod installer:
 | **Claude Code** (native binary) | ClawGod patches the official Bun standalone binary you already have | [`claude.ai/install.sh`](https://claude.ai/install.sh) (macOS/Linux) or [`claude.ai/install.ps1`](https://claude.ai/install.ps1) (Windows) |
 | **ripgrep** | Required by Claude Code's Grep tool | `brew install ripgrep` / `apt install ripgrep` / `winget install BurntSushi.ripgrep.MSVC` |
 | **Node.js >= 18** | Used by the patcher | [nodejs.org](https://nodejs.org) |
-
-[Bun](https://bun.sh) is the runtime that executes the patched cli.js — the installer auto-installs it if missing.
+| **Bun** | Runtime for the patched cli.js; auto-installed if missing | [bun.sh](https://bun.sh), `npm install -g bun`, `scoop install bun`, or `choco install bun` |
 
 ## Install
 
@@ -75,6 +74,7 @@ Green logo = patched. Orange logo = original.
 | Feature | What it does |
 |---------|-------------|
 | **1h Prompt Cache** | Forces 1h TTL allowlist on (was effectively 5m → much higher cache_creation token usage) |
+| **Third-Party Cache Fix** | Auto-disables `x-anthropic-billing-header` when `baseURL` is non-Anthropic. The header's per-request `cch` field breaks prompt-cache hit rate on DeepSeek / OneAPI / Bedrock / vLLM and any other Anthropic-compatible proxy. You no longer need to set `CLAUDE_CODE_ATTRIBUTION_HEADER=0` yourself. |
 | **Auto Re-patch** | Detects when the user's native Claude binary has been upgraded; transparently re-extracts and re-patches on next launch |
 
 ## Commands
@@ -159,3 +159,7 @@ Uninstall restores `claude.orig → claude` and removes the `clawgod` alias.
 ## License
 
 GPL-3.0 — Not affiliated with Anthropic. Use at your own risk.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=0Chencc/clawgod&type=date&legend=top-left)](https://www.star-history.com/?repos=0Chencc%2Fclawgod&type=date&legend=top-left)

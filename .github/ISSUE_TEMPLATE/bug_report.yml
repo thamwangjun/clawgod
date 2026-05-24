@@ -21,14 +21,16 @@ body:
   - type: textarea
     id: description
     attributes:
-      label: What happened?
-      description: Paste error messages if any.
+      label: What happened? Paste error log
+      description: Paste error messages if any.Paste error log
       render: shell
     validations:
       required: true
-
+      
   - type: textarea
     id: screenshot
     attributes:
       label: Screenshot (optional)
       description: Drag and drop if helpful.
+    validations:
+      required: true

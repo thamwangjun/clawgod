@@ -21,8 +21,7 @@
 | **Claude Code**（原生二进制） | ClawGod 是基于你已装的官方 Bun standalone 二进制做 patch | [`claude.ai/install.sh`](https://claude.ai/install.sh)（macOS/Linux）或 [`claude.ai/install.ps1`](https://claude.ai/install.ps1)（Windows） |
 | **ripgrep** | Claude Code 内置 Grep tool 必需 | `brew install ripgrep` / `apt install ripgrep` / `winget install BurntSushi.ripgrep.MSVC` |
 | **Node.js >= 18** | patcher 使用 | [nodejs.org](https://nodejs.org) |
-
-[Bun](https://bun.sh) 是运行 patched cli.js 的 runtime——installer 检测不到时会自动安装。
+| **Bun** | 运行 patched cli.js 的 runtime，缺失时自动安装 | [bun.sh](https://bun.sh)、`npm install -g bun`、`scoop install bun` 或 `choco install bun` |
 
 ## 安装
 
@@ -75,6 +74,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 | ie
 | 功能 | 作用 |
 |------|------|
 | **1h Prompt Cache** | 强制启用 1h TTL allowlist（默认实际是 5m → 空闲后导致大量 cache_creation token 浪费） |
+| **第三方 Cache 修复** | 当 `baseURL` 指向非 Anthropic 域名时自动关闭 `x-anthropic-billing-header`。该 header 里的 `cch` 字段每请求都变，会让 DeepSeek / OneAPI / Bedrock / vLLM 以及所有 Anthropic 协议代理的 prompt-cache 命中率归零。不需要再自行配置 `CLAUDE_CODE_ATTRIBUTION_HEADER=0`。 |
 | **自动重打补丁** | 检测到用户官方升级了 native Claude binary 时，下次启动自动重新抽取 + 重新 patch |
 
 ## 使用
@@ -159,3 +159,7 @@ irm https://github.com/0Chencc/clawgod/releases/latest/download/install.ps1 -Out
 ## 许可证
 
 GPL-3.0 — 与 Anthropic 无关，风险自负。
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/chart?repos=0Chencc/clawgod&type=date&legend=top-left)](https://www.star-history.com/?repos=0Chencc%2Fclawgod&type=date&legend=top-left)
