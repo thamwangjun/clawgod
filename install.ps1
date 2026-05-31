@@ -997,6 +997,7 @@ if (config.timeoutMs) {
 }
 process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC ??= '1';
 process.env.DISABLE_INSTALLATION_CHECKS ??= '1';
+process.env.CLAUDE_CODE_ENABLE_AUTO_MODE ??= '1';
 process.env.USE_BUILTIN_RIPGREP ??= '1';
 
 const featuresFile = join(providerDir, 'features.json');
@@ -1079,8 +1080,11 @@ const patches = [
   },
   {
     name: 'Ultrareview enable',
-    pattern: /function ([\w$]+)\(\)\{return [\w$]+\("tengu_review_bughunter_config",null\)(\?\.enabled===!0)?\}/g,
-    replacer: (m, fn) => `function ${fn}(){return{enabled:!0}}`,
+    pattern: /function ([\w$]+)\(\)\{return ([\w$]+)\("tengu_review_bughunter_config",null\)(\?\.enabled===!0)?\}/g,
+    replacer: (m, fn, getter, gate) =>
+      gate
+        ? `function ${fn}(){return!0}`
+        : `function ${fn}(){let _r=${getter}("tengu_review_bughunter_config",null);return _r?{..._r,enabled:!0}:{enabled:!0}}`,
     sentinel: '"tengu_review_bughunter_config"',
   },
   {
@@ -1124,14 +1128,16 @@ const patches = [
     replacer: (m, fn) => `function ${fn}(){return!0}`,
   },
   {
-    // ≤v2.1.110: let Y=Dq();if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;return/^claude-(opus|sonnet)-4-6/.test(K)
-    // v2.1.119+: same gate plus extra branches for claude-opus-4-7.
-    // v2.1.139+: gate moved inside function wuH(H){let $=R7(H),q=Wq();if(q!=="firstParty"&&q!=="anthropicAws")return!1;if($.includes("claude-3-")||...)return!0;return!1}
-    //            i.e. the `let` lifted to a comma-list before the if; the if-gate
-    //            itself is unchanged shape. We drop only the if-gate; downstream
-    //            model allow-list still runs and now accepts third-party calls.
+    // ≤v2.1.110: if(Y!=="firstParty"&&Y!=="anthropicAws")return!1;
+    // v2.1.119–v2.1.149: same shape, extra model branches downstream.
+    // v2.1.158+: provider gate refactored into cH8() helper (bypassed via
+    //   CLAUDE_CODE_ENABLE_AUTO_MODE env set in wrapper); remaining in-line
+    //   gate gained a model-condition suffix:
+    //   if(q!=="firstParty"&&q!=="anthropicAws"&&($==="claude-opus-4-6"||…))return!1;
+    //   [^;]* absorbs the optional &&(…) tail safely (no semicolons inside
+    //   the if-condition).
     name: 'Auto-mode unlock for third-party API',
-    pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"\)return!1;/g,
+    pattern: /if\(([\w$]+)!=="firstParty"&&\1!=="anthropicAws"[^;]*\)return!1;/g,
     replacer: () => '',
     sentinel: '!=="firstParty"&&',
   },
@@ -1220,6 +1226,34 @@ const patches = [
     replacer: (m, fn, ret) => `return ${ret}`,
     optional: true,
   },
+  {
+    // Shell-integration generator (iT6 in v2.1.140, was Wa1 in older versions)
+    // emits a zsh/bash function that calls the native claude binary with
+    // ARGV0=ugrep|rg|... for multitool dispatch. After clawgod installs, the
+    // baked path points at our shell-script launcher (or .cmd on Windows) —
+    // but shell scripts CANNOT preserve argv[0] (kernel shebang re-exec
+    // overwrites it, and zsh additionally refuses to export ARGV0 as env).
+    // The shell function then fails because bun receives e.g. -G and errors
+    // with "Invalid Argument".
+    //
+    // Fix: redirect the baked path to claude.orig[.exe] (the native binary
+    // backup clawgod creates at install time). Then the multitool dispatch
+    // reaches a real binary that honors argv[0]. See issue #82.
+    //
+    // Generator shape across versions:
+    //   v2.1.88 (Wa1):  let Y=E4([_]),...  ← _ is the claude binary path, no in-function compute
+    //   v2.1.140 (iT6): let ...,z=FJ$.join(Le(),A?"claude.exe":"claude"),Y=A?rL(z):z,...
+    //                   ← path computed inside via join(versionsDir, "claude[.exe]")
+    // Anchor on the join(...) ternary form unique to the generator — the
+    // bare "claude.exe":"claude" string also appears in u18() (basename
+    // helper) but never inside a path.join(), so this regex hits exactly the
+    // shell-integration generator and nothing else.
+    name: 'Shell integration → claude.orig (multitool dispatch fix)',
+    pattern: /([\w$]+\.join\([\w$]+\(\),[\w$]+\?)"claude\.exe":"claude"(\))/g,
+    replacer: (m, prefix, suffix) => `${prefix}"claude.orig.exe":"claude.orig"${suffix}`,
+    sentinel: '?"claude.exe":"claude")',
+    optional: true,
+  },
 ];
 
 const args = process.argv.slice(2);
@@ -1279,7 +1313,9 @@ for (const p of patches) {
   let count = 0;
   for (const m of relevant) {
     const replacement = p.replacer(m[0], ...m.slice(1));
-    if (replacement !== m[0]) { if (!dryRun) code = code.replace(m[0], replacement); count++; }
+    // Function-form replace: a string replacement would interpret $$ as $
+    // and break minified identifiers like `a$$`. See install.sh issue #86.
+    if (replacement !== m[0]) { if (!dryRun) code = code.replace(m[0], () => replacement); count++; }
   }
   if (count > 0) { console.log(`  OK ${p.name} (${count})`); applied++; }
   else { console.log(`  >> ${p.name} (no change)`); skipped++; }
